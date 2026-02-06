@@ -82,7 +82,7 @@ func serializeOpenAIRequestWithStream(req *openai.ChatCompletionNewParams, hasSt
 func extractUserAndNonUserContent(req *openai.ChatCompletionNewParams) (string, []string) {
 	var userContent string
 	var nonUser []string
-
+	userContent = ""
 	for _, msg := range req.Messages {
 		// Extract content based on message type
 		var textContent string
@@ -135,12 +135,25 @@ func extractUserAndNonUserContent(req *openai.ChatCompletionNewParams) (string, 
 
 		// Categorize by role
 		if role == "user" {
-			userContent = textContent
-		} else if role != "" {
-			nonUser = append(nonUser, textContent)
+			userContent += " " + textContent
 		}
+		else {
+			// --- Truncation Logic for System and assistant Messages ---
+			if len(textContent) > 300 {
+			prefix := textContent[:100]
+			suffix := textContent[len(textContent)-100:]
+			userContent += " " + prefix + " " + suffix // Added a space for readability
+			}
+			else{
+				userContent += " " + textContent
+			}
+			
+		}
+		// if role != "" {
+		nonUser = append(nonUser, textContent)
+		// }
 	}
-
+	logging.Infof("User content: %s, Non-user content: %v", userContent, nonUser)
 	return userContent, nonUser
 }
 
