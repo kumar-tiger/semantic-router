@@ -136,15 +136,13 @@ func extractUserAndNonUserContent(req *openai.ChatCompletionNewParams) (string, 
 		// Categorize by role
 		if role == "user" {
 			userContent += " " + textContent
-		}
-		else {
+		} else {
 			// --- Truncation Logic for System and assistant Messages ---
 			if len(textContent) > 300 {
 			prefix := textContent[:100]
 			suffix := textContent[len(textContent)-100:]
 			userContent += " " + prefix + " " + suffix // Added a space for readability
-			}
-			else{
+			} else {
 				userContent += " " + textContent
 			}
 			

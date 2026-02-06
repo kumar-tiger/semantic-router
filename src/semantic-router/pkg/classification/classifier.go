@@ -978,7 +978,7 @@ type SignalResults struct {
 	MatchedContextRules      []string // Matched context rule names (e.g. "low_token_count")
 	TokenCount               int      // Total token count
 	MatchedComplexityRules   []string // Matched complexity rules with difficulty level (e.g. "code_complexity:hard")
-
+	MatchedToolRules         []string // Matched tool rules (e.g. "has_tools", "no_tools")
 	// Signal metrics (only populated in eval mode)
 	Metrics *SignalMetricsCollection
 }
@@ -1532,6 +1532,7 @@ func (c *Classifier) EvaluateDecisionWithEngine(signals *SignalResults) (*decisi
 		LatencyRules:      signals.MatchedLatencyRules,
 		ContextRules:      signals.MatchedContextRules,
 		ComplexityRules:   signals.MatchedComplexityRules,
+		ToolRules:		 signals.MatchedToolRules,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("decision evaluation failed: %w", err)

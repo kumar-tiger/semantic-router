@@ -377,7 +377,27 @@ type Signals struct {
 	// Complexity rules for complexity-based classification using embedding similarity
 	// When matched, outputs the rule name with difficulty level (e.g., "code_complexity:hard", "math_complexity:easy")
 	ComplexityRules []ComplexityRule `yaml:"complexity_rules,omitempty"`
+
+	// Tool rules for automatic tool selection
+	// When matched, outputs "has_tools" or "no_tools_needed"
+	ToolRules []ToolRule `yaml:"tool_rules,omitempty"`
 }
+
+
+// ToolRule defines a rule for fact-check signal classification
+// Similar to KeywordRule and EmbeddingRule, but based on ML model classification
+// The classifier determines if a query needs fact verification and outputs
+// one of the predefined signals: "needs_fact_check" or "no_fact_check_needed"
+// Threshold is read from hallucination_mitigation.fact_check_model.threshold
+type ToolRule struct {
+	// Name is the signal name that can be referenced in decision rules
+	// e.g., "needs_fact_check" or "no_fact_check_needed"
+	Name string `yaml:"name"`
+
+	// Description provides human-readable explanation of when this signal is triggered
+	Description string `yaml:"description,omitempty"`
+}
+
 
 // BackendModels represents the configuration for backend models
 type BackendModels struct {

@@ -71,6 +71,7 @@ func (r *OpenAIRouter) performDecisionEvaluation(originalModel string, userConte
 	// Use evaluationText for most signals, but pass allMessagesText for context counting
 	// In extproc, we always use normal mode (only evaluate signals used in decisions)
 	signals := r.Classifier.EvaluateAllSignalsWithContext(evaluationText, allMessagesText, false)
+	signals.MatchedToolRules = ctx.VSRMatchedTools // Add tool rules to signals for decision evaluation
 
 	signalLatency := time.Since(signalStart).Milliseconds()
 

@@ -111,7 +111,11 @@ func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBo
 
 	// Get content from messages
 	userContent, nonUserMessages := extractUserAndNonUserContent(openAIRequest)
-
+	if openAIRequest.Tools != nil && len(openAIRequest.Tools) > 0 {
+		ctx.VSRMatchedTools = []string{"has_tools"}
+	} else {
+		ctx.VSRMatchedTools = []string{"no_tools"}
+	}
 	// Store user content for later use in hallucination detection
 	ctx.UserContent = userContent
 
