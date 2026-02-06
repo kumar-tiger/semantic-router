@@ -190,11 +190,11 @@ func (r *OpenAIRouter) performDecisionEvaluation(originalModel string, userConte
 
 	// Model selection only happens for auto models
 	// When a specific model is requested, we keep it but still apply decision plugins
-	if !r.Config.IsAutoModelName(originalModel) {
-		logging.Infof("Model %s explicitly specified, keeping original model (decision %s plugins will be applied)",
-			originalModel, decisionName)
-		return decisionName, evaluationConfidence, reasoningDecision, ""
-	}
+	// if !r.Config.IsAutoModelName(originalModel) {
+	// 	logging.Infof("Model %s explicitly specified, keeping original model (decision %s plugins will be applied)",
+	// 		originalModel, decisionName)
+	// 	return decisionName, evaluationConfidence, reasoningDecision, ""
+	// }
 
 	// Select best model from the decision's ModelRefs using configured selection algorithm
 	if len(result.Decision.ModelRefs) > 0 {
