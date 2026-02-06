@@ -6,6 +6,7 @@ import (
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	ext_proc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/openai/openai-go"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -20,6 +21,32 @@ import (
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/tracing"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/utils/entropy"
 )
+
+func (r *OpenAIRouter) createModelSelectionResponse(selectedModel string) *ext_proc.ProcessingResponse {
+    // Create a simple JSON body containing the selected model
+    body := []byte(fmt.Sprintf(`{"selected_model": "%s"}`, selectedModel))
+    
+    return &ext_proc.ProcessingResponse{
+        Response: &ext_proc.ProcessingResponse_ImmediateResponse{
+            ImmediateResponse: &ext_proc.ImmediateResponse{
+                Status: &typev3.HttpStatus{
+                    Code: typev3.StatusCode_OK,
+                },
+                Headers: &ext_proc.HeaderMutation{
+                    SetHeaders: []*core.HeaderValueOption{
+                        {
+                            Header: &core.HeaderValue{
+                                Key:      "content-type",
+                                RawValue: []byte("application/json"),
+                            },
+                        },
+                    },
+                },
+                Body: body,
+            },
+        },
+    }
+}
 
 // handleRequestBody processes the request body
 func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBody, ctx *RequestContext) (*ext_proc.ProcessingResponse, error) {
@@ -98,6 +125,17 @@ func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBo
 
 	// Record the initial request to this model (count all requests)
 	metrics.RecordModelRequest(selectedModel)
+	r.startRouterReplay(ctx, originalModel, selectedModel, decisionName)
+	r.recordRoutingLatency(ctx)
+	
+	if selectedModel == "" {
+		selectedModel = originalModel // No decision or model selected, use original model
+		logging.Infof("No model selected by decision evaluation, using original model: %s", originalModel)
+	}
+
+	// LOGIC CHANGE: Return the selected model and stop here
+	logging.Infof("Model selected: %s. Terminating flow as requested.", selectedModel)
+	return r.createModelSelectionResponse(selectedModel), nil
 
 	// Perform security checks with decision-specific settings
 	if response, shouldReturn := r.performJailbreaks(ctx, userContent, nonUserMessages, decisionName); shouldReturn {
