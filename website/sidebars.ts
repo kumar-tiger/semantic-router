@@ -109,6 +109,8 @@ const sidebars: SidebarsConfig = {
         'proposals/prompt-classification-routing',
         'proposals/nvidia-dynamo-integration',
         'proposals/production-stack-integration',
+        'proposals/agentic-rag',
+        'proposals/agentic-memory',
       ],
     },
     {
@@ -117,6 +119,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'training/training-overview',
         'training/model-performance-eval',
+        'training/ml-model-selection',
       ],
     },
     {

@@ -29,6 +29,38 @@ run-router-e2e: build-router download-models
 	@export LD_LIBRARY_PATH=${PWD}/candle-binding/target/release:${PWD}/ml-binding/target/release && \
 		./bin/router -config=config/testing/config.e2e.yaml
 
+# Build the ONNX binding Rust library
+build-onnx-binding: ## Build the ONNX Runtime binding (mmBERT 32K support)
+	@echo "Building ONNX binding Rust library..."
+	@cd onnx-binding && cargo build --release
+	@echo "ONNX binding built successfully"
+
+# Build the ml-binding Rust library (required by router-onnx at runtime)
+build-ml-binding: ## Build the ml-binding Rust library
+	@echo "Building ml-binding Rust library..."
+	@cd ml-binding && cargo build --release
+	@echo "ml-binding built successfully"
+
+# Build the router with ONNX binding support
+# Uses -modfile=go.onnx.mod (candle-binding => ../../onnx-binding)
+# Uses -tags=onnx to select onnx-binding CGO flags at compile time
+build-router-onnx: ## Build the router binary with ONNX binding
+build-router-onnx: build-onnx-binding build-ml-binding
+	@$(LOG_TARGET)
+	@mkdir -p bin
+	@cd src/semantic-router && \
+		CGO_LDFLAGS="-L../../onnx-binding/target/release" \
+		go build -modfile=go.onnx.mod -tags=onnx,milvus -o ../../bin/router-onnx cmd/main.go
+	@echo "Router built with ONNX binding support"
+
+# Run the router with ONNX binding (uses mmBERT 32K via ONNX Runtime)
+run-router-onnx: ## Run the router with ONNX binding (mmBERT embedding model)
+run-router-onnx: build-router-onnx
+	@echo "Running router with ONNX binding..."
+	@echo "Config: $${ONNX_CONFIG_FILE:-config/config.onnx-binding-test.yaml}"
+	@export LD_LIBRARY_PATH=${PWD}/onnx-binding/target/release:${PWD}/ml-binding/target/release && \
+		./bin/router-onnx -config=$${ONNX_CONFIG_FILE:-config/config.onnx-binding-test.yaml} --enable-system-prompt-api=true
+
 # Unit test semantic-router
 # By default, Milvus and Redis tests are skipped. To enable them, set SKIP_MILVUS_TESTS=false and/or SKIP_REDIS_TESTS=false
 # Example: make test-semantic-router SKIP_MILVUS_TESTS=false
@@ -356,3 +388,24 @@ demo-hallucination-auto: ## Run hallucination demo with predefined questions (no
 demo-hallucination-auto: build-router download-models
 	@echo "Starting Hallucination Detection Demo (auto mode)..."
 	@./e2e/testing/hallucination-demo/run_demo.sh --demo
+
+# ============== Image Generation Tests ==============
+
+# Test image generation with vLLM-Omni
+test-image-gen: ## Test image generation via vLLM-Omni (requires vLLM-Omni on localhost:8001)
+test-image-gen:
+	@echo "Testing image generation with vLLM-Omni..."
+	@./scripts/test-image-gen.sh
+
+# Run image generation integration tests (Go)
+test-image-gen-integration: ## Run Go integration tests for image generation
+test-image-gen-integration:
+	@echo "Running image generation integration tests..."
+	@cd src/semantic-router && go test -tags=integration -v ./pkg/imagegen/integration_test.go -timeout 300s
+
+# Run router with image generation config
+run-router-image-gen: ## Run router with image generation config
+run-router-image-gen: build-router
+	@echo "Running router with image generation config..."
+	@export LD_LIBRARY_PATH=${PWD}/candle-binding/target/release:${PWD}/ml-binding/target/release && \
+		./bin/router -config=config/testing/config.image-gen.yaml

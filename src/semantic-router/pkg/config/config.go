@@ -21,10 +21,12 @@ const (
 
 // Model role constants for external models
 const (
-	ModelRoleGuardrail      = "guardrail"
-	ModelRoleClassification = "classification"
-	ModelRoleScoring        = "scoring"
-	ModelRolePreference     = "preference" // For route preference matching via external LLM
+	ModelRoleGuardrail        = "guardrail"
+	ModelRoleClassification   = "classification"
+	ModelRoleScoring          = "scoring"
+	ModelRolePreference       = "preference"        // For route preference matching via external LLM
+	ModelRoleMemoryRewrite    = "memory_rewrite"    // For memory query rewriting
+	ModelRoleMemoryExtraction = "memory_extraction" // For memory fact extraction
 )
 
 // Signal type constants for rule conditions
@@ -75,6 +77,10 @@ type RouterConfig struct {
 
 	// Semantic cache configuration
 	SemanticCache `yaml:"semantic_cache"`
+	// Memory configuration for agentic memory (cross-session context)
+	Memory MemoryConfig `yaml:"memory"`
+	// Vector store configuration for document ingestion and search
+	VectorStore *VectorStoreConfig `yaml:"vector_store,omitempty"`
 	// Response API configuration for stateful conversations
 	ResponseAPI ResponseAPIConfig `yaml:"response_api"`
 	// Router Replay configuration for recording routing decisions
@@ -167,7 +173,7 @@ type IntelligentRouting struct {
 	Strategy string `yaml:"strategy,omitempty"`
 
 	// ModelSelection configures the algorithm used for model selection
-	// Supported methods: "static", "elo", "router_dc", "automix", "hybrid"
+	// Supported methods: "static", "elo", "router_dc", "automix", "hybrid", "knn", "kmeans", "svm", "rl_driven", "gmtrouter"
 	ModelSelection ModelSelectionConfig `yaml:"model_selection,omitempty"`
 
 	// Reasoning mode configuration
@@ -182,7 +188,7 @@ type IntelligentRouting struct {
 //   - Hybrid: Cost-Efficient Quality-Aware Query Routing (arXiv:2404.14618)
 type ModelSelectionConfig struct {
 	// Method specifies the selection algorithm to use
-	// Options: "static", "elo", "router_dc", "automix", "hybrid"
+	// Options: "static", "elo", "router_dc", "automix", "hybrid", "knn", "kmeans", "svm", "rl_driven", "gmtrouter"
 	// Default: "static" (uses static scores from configuration)
 	Method string `yaml:"method,omitempty"`
 
@@ -340,6 +346,59 @@ type HybridSelectionConfig struct {
 	NormalizeScores bool `yaml:"normalize_scores,omitempty"`
 }
 
+// RLDrivenSelectionConfig configures RL-based model selection
+// Reference: Router-R1 (arXiv:2506.09033)
+type RLDrivenSelectionConfig struct {
+	// ExplorationRate controls initial exploration (0-1, default: 0.3)
+	ExplorationRate float64 `yaml:"exploration_rate,omitempty"`
+
+	// UseThompsonSampling enables Thompson Sampling (default: true)
+	UseThompsonSampling bool `yaml:"use_thompson_sampling,omitempty"`
+
+	// EnablePersonalization enables per-user preference tracking
+	EnablePersonalization bool `yaml:"enable_personalization,omitempty"`
+
+	// PersonalizationBlend controls global vs user-specific blend (0-1, default: 0.3)
+	PersonalizationBlend float64 `yaml:"personalization_blend,omitempty"`
+
+	// CostAwareness enables cost-aware exploration
+	CostAwareness bool `yaml:"cost_awareness,omitempty"`
+
+	// CostWeight controls cost influence when CostAwareness is enabled (0-1)
+	CostWeight float64 `yaml:"cost_weight,omitempty"`
+
+	// UseRouterR1Rewards enables Router-R1 style reward computation
+	UseRouterR1Rewards bool `yaml:"use_router_r1_rewards,omitempty"`
+
+	// EnableLLMRouting enables LLM-based routing using Router-R1 approach
+	EnableLLMRouting bool `yaml:"enable_llm_routing,omitempty"`
+
+	// RouterR1ServerURL is the URL of the Router-R1 LLM server
+	RouterR1ServerURL string `yaml:"router_r1_server_url,omitempty"`
+}
+
+// GMTRouterSelectionConfig configures graph-based personalized routing
+// Reference: GMTRouter (arXiv:2511.08590)
+type GMTRouterSelectionConfig struct {
+	// EnablePersonalization enables user-specific preference learning
+	EnablePersonalization bool `yaml:"enable_personalization,omitempty"`
+
+	// HistorySampleSize is the number of interaction histories to sample (default: 5)
+	HistorySampleSize int `yaml:"history_sample_size,omitempty"`
+
+	// MinInteractionsForPersonalization is minimum interactions before personalization
+	MinInteractionsForPersonalization int `yaml:"min_interactions_for_personalization,omitempty"`
+
+	// MaxInteractionsPerUser limits stored interactions per user (default: 100)
+	MaxInteractionsPerUser int `yaml:"max_interactions_per_user,omitempty"`
+
+	// ModelPath is the path to trained GMTRouter model weights
+	ModelPath string `yaml:"model_path,omitempty"`
+
+	// StoragePath is where to persist interaction graph
+	StoragePath string `yaml:"storage_path,omitempty"`
+}
+
 type Signals struct {
 	// Keyword-based classification rules
 	KeywordRules []KeywordRule `yaml:"keyword_rules,omitempty"`
@@ -465,6 +524,9 @@ type EmbeddingModels struct {
 	// Path to mmBERT 2D Matryoshka embedding model directory
 	// Supports layer early exit (3/6/11/22 layers) and dimension reduction (64-768)
 	MmBertModelPath string `yaml:"mmbert_model_path"`
+	// Path to BERT/MiniLM embedding model directory (e.g., all-MiniLM-L6-v2, all-MiniLM-L12-v2)
+	// Produces 384-dim embeddings, recommended for memory retrieval due to forgiving semantic matching
+	BertModelPath string `yaml:"bert_model_path"`
 	// Use CPU for inference (default: true, auto-detect GPU if available)
 	UseCPU bool `yaml:"use_cpu"`
 
@@ -732,6 +794,56 @@ type SemanticCache struct {
 	EmbeddingModel string `yaml:"embedding_model,omitempty"`
 }
 
+// MemoryConfig represents the configuration for agentic memory
+type MemoryConfig struct {
+	// Enable memory features globally.
+	// Auto-enabled if any decision uses memory plugin.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// AutoStore enables automatic memory extraction from conversations
+	AutoStore bool `yaml:"auto_store,omitempty"`
+
+	// Milvus configuration for memory storage
+	Milvus MemoryMilvusConfig `yaml:"milvus,omitempty"`
+
+	// EmbeddingModel specifies which embedding model to use
+	// If not set, auto-detected from embedding_models section
+	// Options: "bert", "mmbert", "qwen3", "gemma"
+	EmbeddingModel string `yaml:"embedding_model,omitempty"`
+
+	// ExtractionBatchSize is the number of turns between extraction runs (default: 10)
+	ExtractionBatchSize int `yaml:"extraction_batch_size,omitempty"`
+
+	// Default retrieval limit (max number of results to return)
+	// Default: 5
+	DefaultRetrievalLimit int `yaml:"default_retrieval_limit,omitempty"`
+
+	// Default similarity threshold for memory retrieval (0.0-1.0)
+	// Default: 0.6
+	DefaultSimilarityThreshold float32 `yaml:"default_similarity_threshold,omitempty"`
+
+	// Note: Query rewriting and fact extraction are enabled by defining
+	// external_models with model_role="memory_rewrite" or "memory_extraction".
+	// Use FindExternalModelByRole() to check if enabled and get config.
+}
+
+// MemoryMilvusConfig contains Milvus-specific configuration for memory storage.
+type MemoryMilvusConfig struct {
+	// Milvus server address (e.g., "localhost:19530")
+	Address string `yaml:"address"`
+
+	// Collection name for memory storage (default: "agentic_memory")
+	Collection string `yaml:"collection,omitempty"`
+
+	// Embedding dimension (default: 384 for all-MiniLM-L6-v2)
+	Dimension int `yaml:"dimension,omitempty"`
+
+	// NumPartitions for partition key distribution (default: 16, max: 1024)
+	// Higher values improve per-user query performance at scale.
+	// Recommendation: 64 for <100K users, 256 for 100K-1M users.
+	NumPartitions int `yaml:"num_partitions,omitempty"`
+}
+
 // ResponseAPIConfig configures the Response API for stateful conversations.
 // The Response API provides OpenAI-compatible /v1/responses endpoints
 // that support conversation chaining via previous_response_id.
@@ -814,6 +926,17 @@ type KeywordRule struct {
 	Operator      string   `yaml:"operator"`
 	Keywords      []string `yaml:"keywords"`
 	CaseSensitive bool     `yaml:"case_sensitive"`
+
+	// FuzzyMatch enables approximate string matching using Levenshtein distance.
+	// When enabled, keywords will match even with typos (e.g., "urgnt" matches "urgent").
+	// Default: false (exact matching only)
+	FuzzyMatch bool `yaml:"fuzzy_match,omitempty"`
+
+	// FuzzyThreshold sets the maximum Levenshtein distance for fuzzy matching.
+	// Lower values = stricter matching (1-2 recommended for short words, 2-3 for longer).
+	// Only used when FuzzyMatch is true.
+	// Default: 2
+	FuzzyThreshold int `yaml:"fuzzy_threshold,omitempty"`
 }
 
 // Aggregation method used in keyword embedding rule
@@ -1047,10 +1170,9 @@ type PreferenceModelConfig struct {
 type ExternalModelConfig struct {
 	// Provider (e.g., "vllm")
 	Provider string `yaml:"llm_provider"`
-	// Classifier type (e.g., "guardrail", "classification", "scoring")
+	// Classifier type (e.g., "guardrail", "classification", "scoring", "memory_rewrite", "memory_extraction")
 	ModelRole string `yaml:"model_role"`
-	// Dedicated LLM endpoint configuration for PromptGuard
-	// This is separate from vllm_endpoints (which are for backend inference)
+	// Dedicated LLM endpoint configuration
 	ModelEndpoint ClassifierVLLMEndpoint `yaml:"llm_endpoint,omitempty"`
 	// Model name on LLM server (e.g., "Qwen/Qwen3Guard-Gen-0.6B")
 	ModelName string `yaml:"llm_model_name,omitempty"`
@@ -1067,6 +1189,10 @@ type ExternalModelConfig struct {
 	// Optional access key for Authorization header
 	// If provided, will be sent as "Authorization: Bearer <access_key>"
 	AccessKey string `yaml:"access_key,omitempty"`
+	// Maximum tokens for LLM generation (used by memory_rewrite, memory_extraction)
+	MaxTokens int `yaml:"max_tokens,omitempty"`
+	// Temperature for LLM generation (used by memory_rewrite, memory_extraction)
+	Temperature float64 `yaml:"temperature,omitempty"`
 }
 
 // ToolFilteringWeights defines per-signal weights for advanced tool filtering.
@@ -1441,6 +1567,11 @@ type AlgorithmConfig struct {
 	// - "router_dc": Use dual-contrastive learning for query-model matching
 	// - "automix": Use POMDP-based cost-quality optimization
 	// - "hybrid": Combine multiple selection methods with configurable weights
+	// - "rl_driven": Use reinforcement learning with Thompson Sampling (arXiv:2506.09033)
+	// - "gmtrouter": Use heterogeneous graph learning for personalized routing (arXiv:2511.08590)
+	// - "knn": Use K-Nearest Neighbors for query-based model selection
+	// - "kmeans": Use KMeans clustering for model selection
+	// - "svm": Use Support Vector Machine for model classification
 	Type string `yaml:"type"`
 
 	// Looper algorithm configurations (for multi-model execution)
@@ -1450,10 +1581,12 @@ type AlgorithmConfig struct {
 
 	// Selection algorithm configurations (for single model selection)
 	// These align with the global ModelSelectionConfig but can be overridden per-decision
-	Elo      *EloSelectionConfig      `yaml:"elo,omitempty"`
-	RouterDC *RouterDCSelectionConfig `yaml:"router_dc,omitempty"`
-	AutoMix  *AutoMixSelectionConfig  `yaml:"automix,omitempty"`
-	Hybrid   *HybridSelectionConfig   `yaml:"hybrid,omitempty"`
+	Elo       *EloSelectionConfig       `yaml:"elo,omitempty"`
+	RouterDC  *RouterDCSelectionConfig  `yaml:"router_dc,omitempty"`
+	AutoMix   *AutoMixSelectionConfig   `yaml:"automix,omitempty"`
+	Hybrid    *HybridSelectionConfig    `yaml:"hybrid,omitempty"`
+	RLDriven  *RLDrivenSelectionConfig  `yaml:"rl_driven,omitempty"`
+	GMTRouter *GMTRouterSelectionConfig `yaml:"gmtrouter,omitempty"`
 
 	// OnError defines behavior when algorithm fails: "skip" or "fail"
 	// - "skip": Skip and use fallback (default)
@@ -1630,7 +1763,7 @@ type ModelRef struct {
 
 // DecisionPlugin represents a plugin configuration for a decision
 type DecisionPlugin struct {
-	// Type specifies the plugin type. Permitted values: "semantic-cache", "jailbreak", "pii", "system_prompt", "header_mutation", "hallucination", "router_replay".
+	// Type specifies the plugin type. Permitted values: "semantic-cache", "jailbreak", "pii", "system_prompt", "header_mutation", "hallucination", "router_replay", "memory".
 	Type string `yaml:"type" json:"type"`
 
 	// Configuration is the raw configuration for this plugin
@@ -1647,6 +1780,14 @@ type SemanticCachePluginConfig struct {
 	Enabled             bool     `json:"enabled" yaml:"enabled"`
 	SimilarityThreshold *float32 `json:"similarity_threshold,omitempty" yaml:"similarity_threshold,omitempty"`
 	TTLSeconds          *int     `json:"ttl_seconds,omitempty" yaml:"ttl_seconds,omitempty"` // Per-entry TTL (0 = do not cache, nil = use global default)
+}
+
+// MemoryPluginConfig is per-decision memory config (overrides global MemoryConfig).
+type MemoryPluginConfig struct {
+	Enabled             bool     `json:"enabled" yaml:"enabled"`                                               // If false, memory is skipped even if globally enabled
+	RetrievalLimit      *int     `json:"retrieval_limit,omitempty" yaml:"retrieval_limit,omitempty"`           // Max memories to retrieve (nil = use global)
+	SimilarityThreshold *float32 `json:"similarity_threshold,omitempty" yaml:"similarity_threshold,omitempty"` // Min similarity score (nil = use global)
+	AutoStore           *bool    `json:"auto_store,omitempty" yaml:"auto_store,omitempty"`                     // Auto-extract memories (nil = use request config)
 }
 
 // JailbreakPluginConfig represents configuration for jailbreak plugin
@@ -1819,6 +1960,12 @@ func (d *Decision) GetPluginConfig(pluginType string) interface{} {
 
 // unmarshalPluginConfig unmarshals plugin configuration to a target struct
 // Handles both map[string]interface{} (from YAML) and []byte (from Kubernetes RawExtension)
+// UnmarshalPluginConfig converts a plugin configuration (typically from YAML)
+// into the given target struct.
+func UnmarshalPluginConfig(config interface{}, target interface{}) error {
+	return unmarshalPluginConfig(config, target)
+}
+
 func unmarshalPluginConfig(config interface{}, target interface{}) error {
 	if config == nil {
 		return fmt.Errorf("plugin configuration is nil")
@@ -1987,6 +2134,21 @@ func (d *Decision) GetRouterReplayConfig() *RouterReplayPluginConfig {
 	result := &RouterReplayPluginConfig{}
 	if err := unmarshalPluginConfig(config, result); err != nil {
 		logging.Errorf("Failed to unmarshal router_replay config: %v", err)
+		return nil
+	}
+	return result
+}
+
+// GetMemoryConfig returns the memory plugin config, or nil to use global config.
+func (d *Decision) GetMemoryConfig() *MemoryPluginConfig {
+	config := d.GetPluginConfig("memory")
+	if config == nil {
+		return nil
+	}
+
+	result := &MemoryPluginConfig{}
+	if err := unmarshalPluginConfig(config, result); err != nil {
+		logging.Errorf("Failed to unmarshal memory config: %v", err)
 		return nil
 	}
 	return result
