@@ -70,6 +70,11 @@ const (
 	// Reference: FusionFactory (arXiv:2507.10540), Avengers-Pro (arXiv:2508.12631)
 	MethodSVM SelectionMethod = "svm"
 
+	// MethodMLP uses Multi-Layer Perceptron for GPU-accelerated model selection
+	// Neural network classifier using Candle for efficient GPU inference
+	// Reference: FusionFactory (arXiv:2507.10540) query-level fusion via MLP routers
+	MethodMLP SelectionMethod = "mlp"
+
 	// MethodRLDriven uses reinforcement learning for personalized model selection
 	// Implements Router-R1 reward structure (format, outcome, cost) for RL training
 	// Reference: Router-R1 (arXiv:2506.09033)
@@ -79,6 +84,10 @@ const (
 	// Learns user preferences from multi-turn interactions using HGT message passing
 	// Reference: GMTRouter (arXiv:2511.08590)
 	MethodGMTRouter SelectionMethod = "gmtrouter"
+
+	// MethodLatencyAware uses TPOT/TTFT percentile data for latency-aware model selection
+	// Selects the fastest model from candidates based on configured latency percentiles
+	MethodLatencyAware SelectionMethod = "latency_aware"
 )
 
 // SelectionContext provides context for model selection decisions
@@ -118,6 +127,12 @@ type SelectionContext struct {
 	// SessionID identifies the conversation session for multi-turn context (optional)
 	// Used to track within-session model performance
 	SessionID string
+
+	// LatencyAwareTPOTPercentile is the configured TPOT percentile (1-100) for latency_aware selection
+	LatencyAwareTPOTPercentile int
+
+	// LatencyAwareTTFTPercentile is the configured TTFT percentile (1-100) for latency_aware selection
+	LatencyAwareTTFTPercentile int
 }
 
 // SelectionResult contains the result of a model selection decision

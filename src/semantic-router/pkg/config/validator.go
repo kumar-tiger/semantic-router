@@ -97,6 +97,17 @@ func validateConfigStructure(cfg *RouterConfig) error {
 		return nil
 	}
 
+	hasLegacyLatencyConfig := hasLegacyLatencyRoutingConfig(cfg)
+	hasLatencyAwareDecision := hasAnyLatencyAwareDecision(cfg.Decisions)
+	if hasLegacyLatencyConfig && hasLatencyAwareDecision {
+		return fmt.Errorf("deprecated latency signal routing config cannot be used with decision.algorithm.type=latency_aware; remove either legacy latency config (signals.latency_rules / conditions.type=latency) or latency_aware decisions")
+	}
+
+	// Emit migration warnings for legacy latency signal-based routing config.
+	if hasLegacyLatencyConfig {
+		warnDeprecatedLatencyConfig(cfg)
+	}
+
 	// File mode: validate decisions have at least one model ref
 	for _, decision := range cfg.Decisions {
 		if len(decision.ModelRefs) == 0 {
@@ -119,6 +130,42 @@ func validateConfigStructure(cfg *RouterConfig) error {
 				}
 			}
 		}
+
+		// Validate algorithm one-of semantics and type-specific configuration.
+		if err := validateDecisionAlgorithmConfig(decision.Name, decision.Algorithm); err != nil {
+			return err
+		}
+	}
+
+	// Validate plugin configurations within each decision
+	for _, decision := range cfg.Decisions {
+		if imageGenCfg := decision.GetImageGenConfig(); imageGenCfg != nil {
+			if err := imageGenCfg.Validate(); err != nil {
+				return fmt.Errorf("decision '%s': %w", decision.Name, err)
+			}
+		}
+	}
+
+	// Validate modality detector configuration
+	if cfg.ModalityDetector.Enabled {
+		if err := cfg.ModalityDetector.ModalityDetectionConfig.Validate(); err != nil {
+			return fmt.Errorf("modality_detector: %w", err)
+		}
+	}
+
+	// Validate image_gen_backends entries
+	if err := validateImageGenBackends(cfg); err != nil {
+		return err
+	}
+
+	// Validate modality decision constraints
+	if err := validateModalityDecisions(cfg); err != nil {
+		return err
+	}
+
+	// Validate modality rules (signal names must be valid)
+	if err := validateModalityRules(cfg.Signals.ModalityRules); err != nil {
+		return err
 	}
 
 	// Validate vLLM classifier configurations
@@ -134,6 +181,221 @@ func validateConfigStructure(cfg *RouterConfig) error {
 	// Validate latency rules
 	if err := validateLatencyRules(cfg.Signals.LatencyRules); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+// validateModalityRules validates modality rule configurations
+func validateModalityRules(rules []ModalityRule) error {
+	validNames := map[string]bool{"AR": true, "DIFFUSION": true, "BOTH": true}
+	for i, rule := range rules {
+		if rule.Name == "" {
+			return fmt.Errorf("modality_rules[%d]: name cannot be empty", i)
+		}
+		if !validNames[rule.Name] {
+			return fmt.Errorf("modality_rules[%d] (%s): name must be one of \"AR\", \"DIFFUSION\", or \"BOTH\"", i, rule.Name)
+		}
+	}
+	return nil
+}
+
+// validateModalityDecisions validates that decisions using modality signals have correct modelRefs.
+// Specifically, a BOTH decision must reference both an AR and a diffusion model, OR a single omni model.
+func validateModalityDecisions(cfg *RouterConfig) error {
+	for _, decision := range cfg.Decisions {
+		for _, cond := range decision.Rules.Conditions {
+			if cond.Type != SignalTypeModality || cond.Name != "BOTH" {
+				continue
+			}
+
+			// This decision matches modality=BOTH — must have both AR and diffusion modelRefs,
+			// OR at least one omni model that can handle both.
+			hasAR := false
+			hasDiffusion := false
+			hasOmni := false
+			for _, ref := range decision.ModelRefs {
+				if params, ok := cfg.ModelConfig[ref.Model]; ok {
+					switch params.Modality {
+					case "ar":
+						hasAR = true
+					case "diffusion":
+						hasDiffusion = true
+					case "omni":
+						hasOmni = true
+					}
+				}
+			}
+
+			// An omni model satisfies both AR and diffusion requirements
+			if hasOmni {
+				continue
+			}
+
+			if !hasAR || !hasDiffusion {
+				return fmt.Errorf("decision %q uses modality condition \"BOTH\" but modelRefs must include both an AR model (modality: \"ar\") and a diffusion model (modality: \"diffusion\"), or an omni model (modality: \"omni\")", decision.Name)
+			}
+		}
+	}
+	return nil
+}
+
+// validateImageGenBackends validates image_gen_backends entries and model_config references
+func validateImageGenBackends(cfg *RouterConfig) error {
+	validTypes := map[string]bool{"vllm_omni": true, "openai": true}
+
+	for name, entry := range cfg.ImageGenBackends {
+		if entry.Type == "" {
+			return fmt.Errorf("image_gen_backends[%s]: type is required (one of \"vllm_omni\", \"openai\")", name)
+		}
+		if !validTypes[entry.Type] {
+			return fmt.Errorf("image_gen_backends[%s]: unknown type %q (must be \"vllm_omni\" or \"openai\")", name, entry.Type)
+		}
+
+		switch entry.Type {
+		case "vllm_omni":
+			if entry.BaseURL == "" {
+				return fmt.Errorf("image_gen_backends[%s]: base_url is required for vllm_omni", name)
+			}
+		case "openai":
+			if entry.APIKey == "" {
+				return fmt.Errorf("image_gen_backends[%s]: api_key is required for openai", name)
+			}
+		}
+	}
+
+	// Validate model_config image_gen_backend references
+	for modelName, params := range cfg.ModelConfig {
+		if params.ImageGenBackend != "" {
+			if _, ok := cfg.ImageGenBackends[params.ImageGenBackend]; !ok {
+				return fmt.Errorf("model_config[%s]: image_gen_backend %q not found in image_gen_backends", modelName, params.ImageGenBackend)
+			}
+		}
+	}
+
+	return nil
+}
+
+func warnDeprecatedLatencyConfig(cfg *RouterConfig) {
+	if len(cfg.Signals.LatencyRules) > 0 {
+		logging.Warnf("DEPRECATED: signals.latency_rules is deprecated and will be removed in a future release. Migrate to decision.algorithm.type=latency_aware.")
+	}
+
+	for _, decision := range cfg.Decisions {
+		for _, condition := range decision.Rules.Conditions {
+			if strings.EqualFold(strings.TrimSpace(condition.Type), SignalTypeLatency) {
+				logging.Warnf("DEPRECATED: decision '%s' uses conditions.type=latency (name=%s), which is deprecated and will be removed in a future release. Migrate to decision.algorithm.type=latency_aware.", decision.Name, condition.Name)
+			}
+		}
+	}
+}
+
+func hasLegacyLatencyRoutingConfig(cfg *RouterConfig) bool {
+	if len(cfg.Signals.LatencyRules) > 0 {
+		return true
+	}
+
+	for _, decision := range cfg.Decisions {
+		for _, condition := range decision.Rules.Conditions {
+			if strings.EqualFold(strings.TrimSpace(condition.Type), SignalTypeLatency) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func hasAnyLatencyAwareDecision(decisions []Decision) bool {
+	for _, decision := range decisions {
+		if decision.Algorithm != nil && strings.EqualFold(strings.TrimSpace(decision.Algorithm.Type), "latency_aware") {
+			return true
+		}
+	}
+	return false
+}
+
+func validateDecisionAlgorithmConfig(decisionName string, algorithm *AlgorithmConfig) error {
+	if algorithm == nil {
+		return nil
+	}
+
+	normalizedType := strings.ToLower(strings.TrimSpace(algorithm.Type))
+	displayType := strings.TrimSpace(algorithm.Type)
+	if displayType == "" {
+		displayType = "<empty>"
+	}
+
+	configuredBlocks := make([]string, 0, 10)
+	addBlock := func(name string, configured bool) {
+		if configured {
+			configuredBlocks = append(configuredBlocks, name)
+		}
+	}
+
+	addBlock("confidence", algorithm.Confidence != nil)
+	addBlock("ratings", algorithm.Ratings != nil)
+	addBlock("remom", algorithm.ReMoM != nil)
+	addBlock("elo", algorithm.Elo != nil)
+	addBlock("router_dc", algorithm.RouterDC != nil)
+	addBlock("automix", algorithm.AutoMix != nil)
+	addBlock("hybrid", algorithm.Hybrid != nil)
+	addBlock("rl_driven", algorithm.RLDriven != nil)
+	addBlock("gmtrouter", algorithm.GMTRouter != nil)
+	addBlock("latency_aware", algorithm.LatencyAware != nil)
+
+	if len(configuredBlocks) > 1 {
+		return fmt.Errorf(
+			"decision '%s': algorithm.type=%s cannot be combined with multiple algorithm config blocks: %s",
+			decisionName,
+			displayType,
+			strings.Join(configuredBlocks, ", "),
+		)
+	}
+
+	expectedBlockByType := map[string]string{
+		"confidence":    "confidence",
+		"ratings":       "ratings",
+		"remom":         "remom",
+		"elo":           "elo",
+		"router_dc":     "router_dc",
+		"automix":       "automix",
+		"hybrid":        "hybrid",
+		"rl_driven":     "rl_driven",
+		"gmtrouter":     "gmtrouter",
+		"latency_aware": "latency_aware",
+	}
+
+	expectedBlock, hasExpectedBlock := expectedBlockByType[normalizedType]
+	if !hasExpectedBlock {
+		if len(configuredBlocks) > 0 {
+			return fmt.Errorf(
+				"decision '%s': algorithm.type=%s cannot be used with algorithm.%s configuration",
+				decisionName,
+				displayType,
+				configuredBlocks[0],
+			)
+		}
+		return nil
+	}
+
+	if len(configuredBlocks) == 1 && configuredBlocks[0] != expectedBlock {
+		return fmt.Errorf(
+			"decision '%s': algorithm.type=%s requires algorithm.%s configuration; found algorithm.%s",
+			decisionName,
+			displayType,
+			expectedBlock,
+			configuredBlocks[0],
+		)
+	}
+
+	if normalizedType == "latency_aware" {
+		if algorithm.LatencyAware == nil {
+			return fmt.Errorf("decision '%s': algorithm.type=latency_aware requires algorithm.latency_aware configuration", decisionName)
+		}
+		if err := validateLatencyAwareAlgorithmConfig(algorithm.LatencyAware); err != nil {
+			return fmt.Errorf("decision '%s', algorithm.latency_aware: %w", decisionName, err)
+		}
 	}
 
 	return nil
@@ -172,6 +434,34 @@ func validateLatencyRules(rules []LatencyRule) error {
 			return fmt.Errorf("latency_rules[%d] (%s): ttft_percentile must be between 1 and 100, got: %d", i, rule.Name, rule.TTFTPercentile)
 		}
 	}
+	return nil
+}
+
+// validateLatencyAwareAlgorithmConfig validates latency_aware algorithm configuration.
+func validateLatencyAwareAlgorithmConfig(cfg *LatencyAwareAlgorithmConfig) error {
+	hasTPOTPercentile := cfg.TPOTPercentile > 0
+	hasTTFTPercentile := cfg.TTFTPercentile > 0
+
+	if !hasTPOTPercentile && !hasTTFTPercentile {
+		return fmt.Errorf("must specify at least one of tpot_percentile (1-100) or ttft_percentile (1-100). RECOMMENDED: use both for comprehensive latency evaluation")
+	}
+
+	// Warn (but don't error) if only one is set - recommend using both
+	if hasTPOTPercentile && !hasTTFTPercentile {
+		logging.Warnf("algorithm.latency_aware: only tpot_percentile is set. RECOMMENDED: also set ttft_percentile for comprehensive latency evaluation (user-perceived latency)")
+	}
+	if !hasTPOTPercentile && hasTTFTPercentile {
+		logging.Warnf("algorithm.latency_aware: only ttft_percentile is set. RECOMMENDED: also set tpot_percentile for comprehensive latency evaluation (token generation throughput)")
+	}
+
+	if hasTPOTPercentile && (cfg.TPOTPercentile < 1 || cfg.TPOTPercentile > 100) {
+		return fmt.Errorf("tpot_percentile must be between 1 and 100, got: %d", cfg.TPOTPercentile)
+	}
+
+	if hasTTFTPercentile && (cfg.TTFTPercentile < 1 || cfg.TTFTPercentile > 100) {
+		return fmt.Errorf("ttft_percentile must be between 1 and 100, got: %d", cfg.TTFTPercentile)
+	}
+
 	return nil
 }
 

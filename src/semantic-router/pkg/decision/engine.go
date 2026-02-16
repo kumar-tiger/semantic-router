@@ -66,10 +66,13 @@ type SignalMatches struct {
 	UserFeedbackRules []string // "need_clarification", "satisfied", "want_different", "wrong_answer"
 	PreferenceRules   []string // Route preference names matched via external LLM
 	LanguageRules     []string // Language codes: "en", "es", "zh", "fr", etc.
-	LatencyRules      []string // Latency rule names that matched based on model TPOT
 	ContextRules      []string // Context rule names matched (e.g. "low_token_count")
 	ComplexityRules   []string // Complexity rules with difficulty level (e.g. "code_complexity:hard")
 	ToolRules    	  []string // "needs_tools" or "no_tools_needed"
+	ModalityRules     []string // Modality classification: "AR", "DIFFUSION", or "BOTH"
+	AuthzRules        []string // Authz rule names matched for user-level routing (e.g. "premium_tier")
+
+	SignalConfidences map[string]float64 // "signalType:ruleName" → real score (0.0-1.0), e.g. {"embedding:ai": 0.88}. Defaults to 1.0 if missing
 }
 
 // DecisionResult represents the result of decision evaluation
@@ -187,21 +190,37 @@ func (e *DecisionEngine) evaluateRuleCombinationWithSignals(
 			conditionMatched = slices.Contains(signals.PreferenceRules, condition.Name)
 		case "language":
 			conditionMatched = slices.Contains(signals.LanguageRules, condition.Name)
-		case "latency":
-			conditionMatched = slices.Contains(signals.LatencyRules, condition.Name)
 		case "context":
 			conditionMatched = slices.Contains(signals.ContextRules, condition.Name)
 		case "complexity":
 			conditionMatched = slices.Contains(signals.ComplexityRules, condition.Name)
 		case "tool":
 			conditionMatched = slices.Contains(signals.ToolRules, condition.Name)
+		case "modality":
+			conditionMatched = slices.Contains(signals.ModalityRules, condition.Name)
+		case "authz":
+			conditionMatched = slices.Contains(signals.AuthzRules, condition.Name)
 		default:
 			continue
 		}
 
 		if conditionMatched {
 			matchedCount++
-			totalConfidence += 1.0 // Each matched condition contributes 1.0 to confidence
+
+			// Use real confidence score if available (e.g., embedding similarity = 0.88),
+			// otherwise fall back to 1.0 for backward compatibility with signals that
+			// don't provide confidence (e.g., fact_check, language).
+			signalKey := fmt.Sprintf("%s:%s", normalizedType, condition.Name)
+			if signals.SignalConfidences != nil {
+				if score, ok := signals.SignalConfidences[signalKey]; ok && score > 0 {
+					totalConfidence += score
+				} else {
+					totalConfidence += 1.0
+				}
+			} else {
+				totalConfidence += 1.0
+			}
+
 			allMatchedRules = append(allMatchedRules, fmt.Sprintf("%s:%s", condition.Type, condition.Name))
 		}
 	}

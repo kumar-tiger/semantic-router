@@ -154,6 +154,9 @@ func (f *Factory) Create() Selector {
 		}
 		selector = rlDrivenSelector
 
+	case MethodLatencyAware:
+		selector = NewLatencyAwareSelector(nil)
+
 	default:
 		// Default to static selector
 		staticSelector := NewStaticSelector(DefaultStaticConfig())
@@ -261,6 +264,14 @@ func (f *Factory) CreateAll() *Registry {
 		registry.Register(MethodSVM, svmAdapter)
 	}
 
+	// Create MLP selector (GPU-accelerated via Candle)
+	mlpAdapter, err := CreateMLPSelector(mlCfg, f.embeddingFunc)
+	if err != nil {
+		logging.Warnf("[SelectionFactory] Failed to create MLP selector: %v", err)
+	} else {
+		registry.Register(MethodMLP, mlpAdapter)
+	}
+
 	// Create RL-Driven selector
 	rlDrivenCfg := f.cfg.RLDriven
 	if rlDrivenCfg == nil {
@@ -286,7 +297,11 @@ func (f *Factory) CreateAll() *Registry {
 	}
 	registry.Register(MethodGMTRouter, gmtRouterSelector)
 
-	logging.Infof("[SelectionFactory] Created all selectors: static, elo, router_dc, automix, hybrid, knn, kmeans, svm, rl_driven, gmtrouter")
+	// Create LatencyAware selector
+	latencyAwareSelector := NewLatencyAwareSelector(nil)
+	registry.Register(MethodLatencyAware, latencyAwareSelector)
+
+	logging.Infof("[SelectionFactory] Created all selectors: static, elo, router_dc, automix, hybrid, knn, kmeans, svm, mlp, rl_driven, gmtrouter, latency_aware")
 	return registry
 }
 

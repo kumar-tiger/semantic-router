@@ -41,6 +41,8 @@ const (
 	SignalTypeLatency      = "latency"
 	SignalTypeContext      = "context"
 	SignalTypeComplexity   = "complexity"
+	SignalTypeModality     = "modality"
+	SignalTypeAuthz        = "authz"
 )
 
 // API format constants for model backends
@@ -103,6 +105,113 @@ type RouterConfig struct {
 	BackendModels `yaml:",inline"`
 	// ToolSelection for automatic tool selection
 	ToolSelection `yaml:",inline"`
+
+	// Authz configures the credential resolution chain for per-user LLM API keys.
+	// If omitted, defaults to: header-injection (standard headers) → static-config.
+	Authz AuthzConfig `yaml:"authz,omitempty"`
+}
+
+// AuthzConfig configures how the router resolves per-user LLM API keys.
+// The provider chain is tried in order; the first provider that returns a
+// non-empty key wins.
+//
+// If Providers is empty, the router uses a default chain:
+//
+//  1. header-injection (reads x-user-openai-key, x-user-anthropic-key)
+//  2. static-config    (reads model_config.*.access_key from this YAML)
+//
+// Security: By default, the resolver operates in fail-closed mode — if no
+// provider can resolve a key, the request is rejected. Set fail_open: true
+// only if you intentionally want to allow requests without API keys (e.g.,
+// routing to local vLLM backends that don't require auth).
+//
+// Example (Authorino — uses defaults, identity section optional):
+//
+//	authz:
+//	  fail_open: false
+//	  providers:
+//	    - type: header-injection
+//	    - type: static-config
+//
+// Example (Envoy Gateway JWT — custom identity headers):
+//
+//	authz:
+//	  fail_open: false
+//	  identity:
+//	    user_id_header: "x-jwt-sub"
+//	    user_groups_header: "x-jwt-groups"
+//	  providers:
+//	    - type: header-injection
+//	      headers:
+//	        openai: "x-user-openai-key"
+//	    - type: static-config
+type AuthzConfig struct {
+	// FailOpen controls behavior when no provider can resolve an API key.
+	//   false (default): reject the request with a clear error — prevents
+	//                    silent bypass from misconfig or ext_authz failures.
+	//   true:            allow the request through without a key — use only
+	//                    for local/vLLM backends that don't require auth.
+	FailOpen bool `yaml:"fail_open,omitempty"`
+
+	// Identity configures which request headers carry the authenticated user's
+	// identity (user ID and group memberships). These headers are injected by
+	// the auth backend before the request reaches the router.
+	//
+	// Defaults (when omitted) match Authorino conventions:
+	//   user_id_header:     "x-authz-user-id"
+	//   user_groups_header: "x-authz-user-groups"
+	//
+	// Override these when using a different auth backend:
+	//   Envoy Gateway JWT (claim_to_headers): "x-jwt-sub", "x-jwt-groups"
+	//   oauth2-proxy:                         "x-forwarded-user", "x-forwarded-groups"
+	//   Istio RequestAuthentication:           "x-jwt-claim-sub", "x-jwt-claim-groups"
+	Identity IdentityConfig `yaml:"identity,omitempty"`
+
+	Providers []AuthzProviderConfig `yaml:"providers,omitempty"`
+}
+
+// IdentityConfig controls how the router reads user identity from request headers.
+// These headers are set by the auth backend (Authorino, Envoy Gateway JWT,
+// oauth2-proxy, etc.) after successful authentication. The AuthzClassifier uses
+// them to match role_bindings subjects.
+//
+// When omitted, defaults match the Authorino convention (x-authz-user-id,
+// x-authz-user-groups). Override when using a different backend.
+type IdentityConfig struct {
+	// UserIDHeader is the request header carrying the authenticated user's ID.
+	// Default: "x-authz-user-id" (Authorino: Secret metadata.name)
+	UserIDHeader string `yaml:"user_id_header,omitempty"`
+
+	// UserGroupsHeader is the request header carrying comma-separated group names.
+	// Default: "x-authz-user-groups" (Authorino: Secret annotation authz-groups)
+	UserGroupsHeader string `yaml:"user_groups_header,omitempty"`
+}
+
+// GetUserIDHeader returns the configured user ID header, or the default if empty.
+func (ic IdentityConfig) GetUserIDHeader() string {
+	if ic.UserIDHeader == "" {
+		return "x-authz-user-id"
+	}
+	return ic.UserIDHeader
+}
+
+// GetUserGroupsHeader returns the configured user groups header, or the default if empty.
+func (ic IdentityConfig) GetUserGroupsHeader() string {
+	if ic.UserGroupsHeader == "" {
+		return "x-authz-user-groups"
+	}
+	return ic.UserGroupsHeader
+}
+
+// AuthzProviderConfig describes a single credential provider in the chain.
+type AuthzProviderConfig struct {
+	// Type is the provider type: "header-injection" or "static-config".
+	Type string `yaml:"type"`
+
+	// Headers maps LLM provider name → request header name.
+	// Only used when Type is "header-injection".
+	// Example: {"openai": "x-user-openai-key", "anthropic": "x-user-anthropic-key"}
+	Headers map[string]string `yaml:"headers,omitempty"`
 }
 
 // ToolSelection represents the configuration for automatic tool selection
@@ -157,6 +266,11 @@ type InlineModels struct {
 
 	// Feedback detector configuration for user satisfaction detection
 	FeedbackDetector FeedbackDetectorConfig `yaml:"feedback_detector"`
+
+	// Modality detector configuration for AR/DIFFUSION/BOTH classification
+	// Follows the same pattern as hallucination_mitigation and feedback_detector:
+	// signal rules in modality_rules (Signals), detector config here (InlineModels)
+	ModalityDetector ModalityDetectorConfig `yaml:"modality_detector"`
 }
 
 // IntelligentRouting represents the configuration for intelligent routing
@@ -227,6 +341,10 @@ type MLSelectionConfig struct {
 
 	// SVM configuration
 	SVM MLSVMConfig `yaml:"svm,omitempty"`
+
+	// MLP configuration (GPU-accelerated via Candle)
+	// Reference: FusionFactory (arXiv:2507.10540) - Query-level fusion via MLP routers
+	MLP MLMLPConfig `yaml:"mlp,omitempty"`
 }
 
 // MLKNNConfig holds KNN-specific configuration
@@ -247,6 +365,15 @@ type MLSVMConfig struct {
 	Kernel         string  `yaml:"kernel,omitempty"`
 	Gamma          float64 `yaml:"gamma,omitempty"`
 	PretrainedPath string  `yaml:"pretrained_path,omitempty"`
+}
+
+// MLMLPConfig holds MLP-specific configuration
+// Reference: FusionFactory (arXiv:2507.10540) - Query-level fusion via MLP routers
+type MLMLPConfig struct {
+	// Device specifies compute device: "cpu", "cuda", or "metal"
+	Device string `yaml:"device,omitempty"`
+	// PretrainedPath is the path to the pretrained MLP model file
+	PretrainedPath string `yaml:"pretrained_path,omitempty"`
 }
 
 // EloSelectionConfig configures Elo rating-based model selection
@@ -399,6 +526,19 @@ type GMTRouterSelectionConfig struct {
 	StoragePath string `yaml:"storage_path,omitempty"`
 }
 
+// LatencyAwareAlgorithmConfig configures latency-aware model selection using TPOT/TTFT percentiles.
+// At least one of TPOTPercentile or TTFTPercentile must be set.
+type LatencyAwareAlgorithmConfig struct {
+	// TPOTPercentile is the percentile bucket to use for TPOT (Time Per Output Token) evaluation (1-100).
+	TPOTPercentile int `yaml:"tpot_percentile,omitempty"`
+
+	// TTFTPercentile is the percentile bucket to use for TTFT (Time To First Token) evaluation (1-100).
+	TTFTPercentile int `yaml:"ttft_percentile,omitempty"`
+
+	// Description provides human-readable explanation of the latency-aware policy.
+	Description string `yaml:"description,omitempty"`
+}
+
 type Signals struct {
 	// Keyword-based classification rules
 	KeywordRules []KeywordRule `yaml:"keyword_rules,omitempty"`
@@ -440,6 +580,17 @@ type Signals struct {
 	// Tool rules for automatic tool selection
 	// When matched, outputs "has_tools" or "no_tools_needed"
 	ToolRules []ToolRule `yaml:"tool_rules,omitempty"`
+	// Modality rules for modality-based signal classification
+	// When matched, outputs "AR", "DIFFUSION", or "BOTH" based on the modality classifier/keyword detection
+	// Detection configuration is read from modality_detector (InlineModels)
+	ModalityRules []ModalityRule `yaml:"modality_rules,omitempty"`
+	// RoleBindings defines RBAC role assignments for user-level authorization.
+	// Each binding maps subjects (users/groups) to a named role (K8s RoleBinding pattern).
+	// The role name is emitted as a signal in the decision engine (type: "authz").
+	// Model access is controlled by decisions via modelRefs, NOT by the role binding.
+	// User identity and groups are read from x-authz-user-id and x-authz-user-groups headers
+	// (injected by Authorino / ext_authz). Subject names MUST match Authorino output.
+	RoleBindings []RoleBinding `yaml:"role_bindings,omitempty"`
 }
 
 
@@ -468,6 +619,19 @@ type BackendModels struct {
 
 	// vLLM endpoints configuration for multiple backend support
 	VLLMEndpoints []VLLMEndpoint `yaml:"vllm_endpoints"`
+
+	// Image generation backend configurations (like reasoning_families)
+	// Named map of provider-specific configs referenced by model_config entries.
+	// vllm_omni and openai use completely different APIs — each entry's Type
+	// determines which fields are relevant.
+	ImageGenBackends map[string]ImageGenBackendEntry `yaml:"image_gen_backends,omitempty"`
+
+	// Provider profiles define cloud provider connection and protocol details
+	// (like reasoning_families defines reasoning syntax per model family).
+	// Each entry describes how to talk to a provider: URL, auth header format, path.
+	// Endpoints reference a profile by name via provider_profile field.
+	// The actual API key comes from the authz CredentialResolver chain, not from here.
+	ProviderProfiles map[string]ProviderProfile `yaml:"provider_profiles,omitempty"`
 }
 
 type ReasoningConfig struct {
@@ -1399,6 +1563,59 @@ type VLLMEndpoint struct {
 	// Can also be set via environment variables: HF_API_KEY, OPENROUTER_API_KEY
 	// +optional
 	APIKey string `yaml:"api_key,omitempty"`
+
+	// ProviderProfileName references a named entry in provider_profiles
+	// (like reasoning_family references reasoning_families).
+	// When set, the profile's base_url, auth header format, and chat path
+	// are used instead of address:port. The API key comes from authz.
+	// +optional
+	ProviderProfileName string `yaml:"provider_profile,omitempty"`
+}
+
+// ProviderProfile defines cloud provider connection and protocol details.
+// The type field drives sensible defaults for auth header, chat path, and
+// LLMProvider mapping. Explicit fields override the defaults.
+//
+// Keys are NOT stored here — they come from the authz CredentialResolver chain
+// (header-injection from Authorino/ext_authz, or static-config from model_config.access_key).
+//
+// Example:
+//
+//	provider_profiles:
+//	  openai-prod:
+//	    type: "openai"
+//	    base_url: "https://api.openai.com/v1"
+//	  azure-east:
+//	    type: "azure-openai"
+//	    base_url: "https://myresource.openai.azure.com/openai/deployments/gpt-4o"
+//	    api_version: "2024-10-21"
+type ProviderProfile struct {
+	// Type drives defaults for auth header, path, and LLMProvider mapping.
+	// Values: "openai", "anthropic", "azure-openai", "bedrock", "gemini", "vertex-ai"
+	Type string `yaml:"type"`
+
+	// BaseURL is the provider's base URL (e.g., "https://api.openai.com/v1").
+	// host:port is extracted for x-vsr-destination-endpoint; path is used for :path header.
+	BaseURL string `yaml:"base_url,omitempty"`
+
+	// AuthHeader overrides the default auth header name for the type
+	// (e.g., "Authorization" for openai, "api-key" for azure-openai, "x-api-key" for anthropic).
+	AuthHeader string `yaml:"auth_header,omitempty"`
+
+	// AuthPrefix overrides the default auth value prefix
+	// (e.g., "Bearer" for openai, "" for azure-openai).
+	AuthPrefix string `yaml:"auth_prefix,omitempty"`
+
+	// ExtraHeaders are added to every request to this provider
+	// (e.g., {"anthropic-version": "2023-06-01"}).
+	ExtraHeaders map[string]string `yaml:"extra_headers,omitempty"`
+
+	// APIVersion for Azure OpenAI — appended as ?api-version= to the chat path.
+	APIVersion string `yaml:"api_version,omitempty"`
+
+	// ChatPath overrides the default chat completion path suffix for the type.
+	// When empty, the type-specific default is used (e.g., "/chat/completions" for openai).
+	ChatPath string `yaml:"chat_path,omitempty"`
 }
 
 // ModelPricing represents configuration for model-specific parameters
@@ -1461,6 +1678,17 @@ type ModelParams struct {
 	// Example: {"huggingface": "meta-llama/Llama-3.1-8B-Instruct", "ollama": "llama3.1:8b"}
 	// +optional
 	ExternalModelIDs map[string]string `yaml:"external_model_ids,omitempty"`
+
+	// Modality role for this model: "ar" (text/autoregressive), "diffusion" (image generation),
+	// or "omni" (can handle both text and image generation in a single request, e.g. vllm-omni
+	// serving Qwen2.5-Omni or similar multimodal models).
+	// Used by modality routing to identify which model handles which modality.
+	// When empty, the model has no modality role.
+	Modality string `yaml:"modality,omitempty"`
+
+	// ImageGenBackend references a named entry in image_gen_backends (like reasoning_family references reasoning_families)
+	// Required when modality is "diffusion" — tells the router which provider config to use for image generation.
+	ImageGenBackend string `yaml:"image_gen_backend,omitempty"`
 }
 
 // LoRAAdapter represents a LoRA adapter configuration for a model
@@ -1569,6 +1797,7 @@ type AlgorithmConfig struct {
 	// - "hybrid": Combine multiple selection methods with configurable weights
 	// - "rl_driven": Use reinforcement learning with Thompson Sampling (arXiv:2506.09033)
 	// - "gmtrouter": Use heterogeneous graph learning for personalized routing (arXiv:2511.08590)
+	// - "latency_aware": Use TPOT/TTFT percentile thresholds for latency-aware model selection
 	// - "knn": Use K-Nearest Neighbors for query-based model selection
 	// - "kmeans": Use KMeans clustering for model selection
 	// - "svm": Use Support Vector Machine for model classification
@@ -1581,12 +1810,13 @@ type AlgorithmConfig struct {
 
 	// Selection algorithm configurations (for single model selection)
 	// These align with the global ModelSelectionConfig but can be overridden per-decision
-	Elo       *EloSelectionConfig       `yaml:"elo,omitempty"`
-	RouterDC  *RouterDCSelectionConfig  `yaml:"router_dc,omitempty"`
-	AutoMix   *AutoMixSelectionConfig   `yaml:"automix,omitempty"`
-	Hybrid    *HybridSelectionConfig    `yaml:"hybrid,omitempty"`
-	RLDriven  *RLDrivenSelectionConfig  `yaml:"rl_driven,omitempty"`
-	GMTRouter *GMTRouterSelectionConfig `yaml:"gmtrouter,omitempty"`
+	Elo          *EloSelectionConfig          `yaml:"elo,omitempty"`
+	RouterDC     *RouterDCSelectionConfig     `yaml:"router_dc,omitempty"`
+	AutoMix      *AutoMixSelectionConfig      `yaml:"automix,omitempty"`
+	Hybrid       *HybridSelectionConfig       `yaml:"hybrid,omitempty"`
+	RLDriven     *RLDrivenSelectionConfig     `yaml:"rl_driven,omitempty"`
+	GMTRouter    *GMTRouterSelectionConfig    `yaml:"gmtrouter,omitempty"`
+	LatencyAware *LatencyAwareAlgorithmConfig `yaml:"latency_aware,omitempty"`
 
 	// OnError defines behavior when algorithm fails: "skip" or "fail"
 	// - "skip": Skip and use fallback (default)
@@ -1720,9 +1950,10 @@ type ReMoMAlgorithmConfig struct {
 }
 
 // MLModelSelectionConfig configures the ML-based model selection algorithm
-// Supported types: knn, kmeans, svm
+// Supported types: knn, kmeans, svm, mlp
+// Reference: FusionFactory (arXiv:2507.10540) - Query-level fusion via tailored LLM routers
 type MLModelSelectionConfig struct {
-	// Type specifies the algorithm: "knn", "kmeans", "svm"
+	// Type specifies the algorithm: "knn", "kmeans", "svm", "mlp"
 	Type string `yaml:"type"`
 
 	// ModelsPath is the path to pre-trained model files (e.g., "trained_models/")
@@ -1746,6 +1977,11 @@ type MLModelSelectionConfig struct {
 	// 0 = pure performance (quality), 1 = pure efficiency (latency)
 	// Use pointer to distinguish "not set" (nil, uses default 0.3) from "explicitly 0"
 	EfficiencyWeight *float64 `yaml:"efficiency_weight,omitempty"`
+
+	// Device specifies the compute device for MLP inference: "cpu", "cuda", "metal"
+	// Default: "cpu". Use "cuda" for NVIDIA GPU or "metal" for Apple Silicon.
+	// Reference: FusionFactory (arXiv:2507.10540) query-level fusion via MLP routers
+	Device string `yaml:"device,omitempty"`
 
 	// FeatureWeights allows custom weighting of features for selection
 	FeatureWeights map[string]float64 `yaml:"feature_weights,omitempty"`
@@ -2165,11 +2401,12 @@ type RuleCombination struct {
 
 // RuleCondition references a specific rule by type and name
 type RuleCondition struct {
-	// Type specifies the rule type: "keyword", "embedding", "domain", or "fact_check"
+	// Type specifies the rule type: "keyword", "embedding", "domain", "fact_check",
+	// "user_feedback", "preference", "language", "latency", "context", "complexity", or "modality".
 	Type string `yaml:"type"`
 
-	// Name is the name of the rule to reference
-	// For fact_check type, use "needs_fact_check" to match queries that need fact verification
+	// Name is the name of the rule to reference.
+	// For fact_check type, use "needs_fact_check" to match queries that need fact verification.
 	Name string `yaml:"name"`
 }
 
@@ -2195,6 +2432,19 @@ type FactCheckRule struct {
 type UserFeedbackRule struct {
 	// Name is the signal name that can be referenced in decision rules
 	// e.g., "need_clarification", "satisfied", "want_different", "wrong_answer"
+	Name string `yaml:"name"`
+
+	// Description provides human-readable explanation of when this signal is triggered
+	Description string `yaml:"description,omitempty"`
+}
+
+// ModalityRule defines a rule for modality-based signal classification.
+// The modality classifier determines whether a prompt requires AR (text), DIFFUSION (image),
+// or BOTH (text + image) and outputs one of these signal names.
+// Detection configuration is read from modality_detector (InlineModels).
+type ModalityRule struct {
+	// Name is the signal name that can be referenced in decision rules
+	// e.g., "AR", "DIFFUSION", or "BOTH"
 	Name string `yaml:"name"`
 
 	// Description provides human-readable explanation of when this signal is triggered
@@ -2286,6 +2536,77 @@ type ContextRule struct {
 	MinTokens   TokenCount `yaml:"min_tokens"`
 	MaxTokens   TokenCount `yaml:"max_tokens"`
 	Description string     `yaml:"description,omitempty"`
+}
+
+// Subject identifies a user or group for RBAC role binding.
+// Modeled after Kubernetes RoleBinding subjects:
+//
+//	subjects:
+//	  - kind: User
+//	    name: "admin"
+//	  - kind: Group
+//	    name: "engineering"
+//
+// The Kind field must be "User" or "Group" (case-insensitive, validated at startup).
+// The Name must match exactly what Authorino injects in x-authz-user-id (for User)
+// or x-authz-user-groups (for Group).
+type Subject struct {
+	// Kind is "User" or "Group" (case-insensitive)
+	Kind string `yaml:"kind"`
+
+	// Name is the user ID or group name — must match the value from Authorino headers
+	Name string `yaml:"name"`
+}
+
+// RoleBinding maps subjects (users/groups) to a named role, following the Kubernetes
+// RBAC RoleBinding pattern. The role name is emitted as a signal in the decision engine
+// (type: "authz"), and decisions define which models each role can access via modelRefs.
+//
+// Kubernetes RBAC analog:
+//
+//	kind: RoleBinding
+//	metadata:
+//	  name: "premium-users"          → RoleBinding.Name
+//	subjects:
+//	  - kind: Group
+//	    name: "premium"              → RoleBinding.Subjects
+//	roleRef:
+//	  name: "premium_tier"           → RoleBinding.Role
+//
+// The RoleBinding does NOT define permissions (model access, pricing, latency).
+// Those are the decision engine's responsibility via modelRefs.
+//
+// RBAC mapping:
+//   - Subject    → users / groups (from Authorino x-authz-user-id / x-authz-user-groups)
+//   - Role       → RoleBinding.Role (the role name used in decision conditions)
+//   - Permission → Decision modelRefs (which models the role can use)
+//
+// Sync contract: the Subject names MUST match the values Authorino injects.
+// User names come from the K8s Secret metadata.name.
+// Group names come from the K8s Secret "authz-groups" annotation.
+type RoleBinding struct {
+	// Name is the binding name (for audit logs and error messages)
+	// This is NOT the role name — it identifies this specific binding.
+	Name string `yaml:"name"`
+
+	// Description provides human-readable explanation of this binding
+	Description string `yaml:"description,omitempty"`
+
+	// Subjects lists the users and groups assigned to this role.
+	// At least one subject must be specified (validated at startup).
+	// A request matches if the user ID matches a User subject OR
+	// any of the user's groups matches a Group subject (OR logic).
+	Subjects []Subject `yaml:"subjects"`
+
+	// Role is the role name that this binding grants.
+	// Referenced in decision conditions as type: "authz", name: "<Role>".
+	// Multiple bindings can grant the same role to different subjects.
+	Role string `yaml:"role"`
+}
+
+// GetRoleBindings returns the configured role bindings.
+func (s *Signals) GetRoleBindings() []RoleBinding {
+	return s.RoleBindings
 }
 
 // ComplexityCandidates defines hard and easy candidates for complexity classification

@@ -31,6 +31,8 @@ const sidebars: SidebarsConfig = {
       label: 'Installation',
       items: [
         'installation/installation',
+        'installation/configuration',
+        'installation/latency-migration',
         {
           type: 'category',
           label: 'Install with Gateways',
@@ -69,6 +71,23 @@ const sidebars: SidebarsConfig = {
             'tutorials/intelligent-route/mcp-routing',
             'tutorials/intelligent-route/lora-routing',
             'tutorials/intelligent-route/router-memory',
+            {
+              type: 'category',
+              label: 'Model Selection',
+              items: [
+                'tutorials/intelligent-route/model-selection/overview',
+                'tutorials/intelligent-route/model-selection/choosing-algorithm',
+                'tutorials/intelligent-route/model-selection/static',
+                'tutorials/intelligent-route/model-selection/elo',
+                'tutorials/intelligent-route/model-selection/router-dc',
+                'tutorials/intelligent-route/model-selection/automix',
+                'tutorials/intelligent-route/model-selection/hybrid',
+                'tutorials/intelligent-route/model-selection/thompson-sampling',
+                'tutorials/intelligent-route/model-selection/gmtrouter',
+                'tutorials/intelligent-route/model-selection/router-r1',
+                'tutorials/intelligent-route/model-selection/troubleshooting',
+              ],
+            },
           ],
         },
         {

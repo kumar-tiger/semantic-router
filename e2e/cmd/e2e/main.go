@@ -11,11 +11,13 @@ import (
 	"github.com/vllm-project/semantic-router/e2e/pkg/framework"
 	aigateway "github.com/vllm-project/semantic-router/e2e/profiles/ai-gateway"
 	aibrix "github.com/vllm-project/semantic-router/e2e/profiles/aibrix"
+	authzrbac "github.com/vllm-project/semantic-router/e2e/profiles/authz-rbac"
 	dynamicconfig "github.com/vllm-project/semantic-router/e2e/profiles/dynamic-config"
 	dynamo "github.com/vllm-project/semantic-router/e2e/profiles/dynamo"
 	istio "github.com/vllm-project/semantic-router/e2e/profiles/istio"
 	llmd "github.com/vllm-project/semantic-router/e2e/profiles/llm-d"
 	mlmodelselection "github.com/vllm-project/semantic-router/e2e/profiles/ml-model-selection"
+	multiendpoint "github.com/vllm-project/semantic-router/e2e/profiles/multi-endpoint"
 	productionstack "github.com/vllm-project/semantic-router/e2e/profiles/production-stack"
 	responseapi "github.com/vllm-project/semantic-router/e2e/profiles/response-api"
 	responseapiredis "github.com/vllm-project/semantic-router/e2e/profiles/response-api-redis"
@@ -25,6 +27,7 @@ import (
 	// Import profiles to register test cases
 	_ "github.com/vllm-project/semantic-router/e2e/profiles/ai-gateway"
 	_ "github.com/vllm-project/semantic-router/e2e/profiles/aibrix"
+	_ "github.com/vllm-project/semantic-router/e2e/profiles/authz-rbac"
 	_ "github.com/vllm-project/semantic-router/e2e/profiles/dynamo"
 	_ "github.com/vllm-project/semantic-router/e2e/profiles/istio"
 	_ "github.com/vllm-project/semantic-router/e2e/profiles/llm-d"
@@ -36,6 +39,9 @@ import (
 
 	// ML-based model selection profile
 	_ "github.com/vllm-project/semantic-router/e2e/profiles/ml-model-selection"
+
+	// Multi-endpoint profile
+	_ "github.com/vllm-project/semantic-router/e2e/profiles/multi-endpoint"
 )
 
 const version = "v1.0.0"
@@ -141,6 +147,10 @@ func getProfile(name string) (framework.Profile, error) {
 		return routingstrategies.NewProfile(), nil
 	case "ml-model-selection":
 		return mlmodelselection.NewProfile(), nil
+	case "multi-endpoint":
+		return multiendpoint.NewProfile(), nil
+	case "authz-rbac":
+		return authzrbac.NewProfile(), nil
 	default:
 		return nil, fmt.Errorf("unknown profile: %s", name)
 	}

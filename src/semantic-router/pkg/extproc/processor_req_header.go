@@ -70,6 +70,9 @@ type RequestContext struct {
 	VSRInjectedSystemPrompt       bool             // Whether a system prompt was injected into the request
 	VSRSelectedDecision           *config.Decision // The decision object selected by DecisionEngine (for plugins)
 
+	// Modality routing classification result (AR/DIFFUSION/BOTH)
+	ModalityClassification *ModalityClassificationResult // Set by classifyModality()
+
 	// VSR signal tracking - stores all matched signals for response headers
 	VSRMatchedKeywords     []string // Matched keyword rule names
 	VSRMatchedEmbeddings   []string // Matched embedding rule names
@@ -78,11 +81,13 @@ type RequestContext struct {
 	VSRMatchedUserFeedback []string // Matched user feedback signals
 	VSRMatchedPreference   []string // Matched preference signals
 	VSRMatchedLanguage     []string // Matched language signals
-	VSRMatchedLatency      []string // Matched latency signals
 	VSRMatchedContext      []string // Matched context rule names (e.g. "low_token_count")
 	VSRContextTokenCount   int      // Actual token count for the request
 	VSRMatchedComplexity   []string // Matched complexity rules with difficulty level (e.g. "code_complexity:hard")
 	VSRMatchedTools      []string // Matched tool rules (e.g. "has_tools", "no_tools")
+	VSRMatchedModality     []string // Matched modality signals: "AR", "DIFFUSION", or "BOTH"
+	VSRMatchedAuthz        []string // Matched authz rule names for user-level routing
+
 	// Endpoint tracking for windowed metrics
 	SelectedEndpoint string // The endpoint address selected for this request
 	// Hallucination mitigation tracking
@@ -137,6 +142,9 @@ type RequestContext struct {
 	// Memory retrieval tracking
 	// Stores formatted memory context to be injected after system prompt
 	MemoryContext string // Formatted memory context (empty if no memories retrieved)
+
+	// Note: Per-user API keys from ext_authz / Authorino are read directly from
+	// ctx.Headers by the CredentialResolver (pkg/authz). No separate fields needed.
 }
 
 // handleRequestHeaders processes the request headers
@@ -184,6 +192,9 @@ func (r *OpenAIRouter) handleRequestHeaders(v *ext_proc.ProcessingRequest_Reques
 			ctx.LooperRequest = true
 			logging.Infof("Detected looper internal request, will skip plugin processing")
 		}
+
+		// Note: ext_authz / Authorino injected headers (x-user-openai-key, x-user-anthropic-key)
+		// are stored in ctx.Headers and read by the CredentialResolver at routing time.
 	}
 
 	// Set request metadata on span
